@@ -79,7 +79,7 @@ afterEach(() => {
   }
 });
 
-test("proxy changes and NO_PROXY retire the old route while unchanged routes reuse", async () => {
+test("proxy changes and NO_PROXY apply to each separate connection", async () => {
   for (const proxy of ["http://proxy-a.example:8080", "http://proxy-b.example:8080"]) {
     process.env.HTTPS_PROXY = proxy;
     await drain();
@@ -89,18 +89,18 @@ test("proxy changes and NO_PROXY retire the old route while unchanged routes reu
   await drain();
   await drain();
   expect(Socket.all.map(socket => socket.options?.proxy))
-    .toEqual(["http://proxy-a.example:8080", "http://proxy-b.example:8080", undefined]);
-  expect(Socket.all.map(socket => socket.frames.length)).toEqual([2, 2, 2]);
-  expect(Socket.all.map(socket => socket.readyState)).toEqual([3, 3, 1]);
+    .toEqual(["http://proxy-a.example:8080", "http://proxy-a.example:8080", "http://proxy-b.example:8080", "http://proxy-b.example:8080", undefined, undefined]);
+  expect(Socket.all.every(socket => socket.frames.length === 1 && socket.readyState === 3)).toBe(true);
 });
 
-test("same account/thread/turn reuses one socket without trimming either HTTP input", async () => {
+test("same account/thread/turn closes each socket without trimming either HTTP input", async () => {
   globalThis.WebSocket = Socket as unknown as typeof WebSocket;
   await (await codexWsUpstreamFetch(URL, init("first full input"), fallback, "1.4.0")).text();
   await (await codexWsUpstreamFetch(URL, init("second full input"), fallback, "1.4.0")).text();
-  expect(Socket.all).toHaveLength(1);
-  expect(Socket.all[0]!.frames.map(frame => frame.input)).toEqual(["first full input", "second full input"]);
-  expect(Socket.all[0]!.frames.every(frame => !Object.hasOwn(frame, "previous_response_id"))).toBe(true);
+  expect(Socket.all).toHaveLength(2);
+  expect(Socket.all.flatMap(socket => socket.frames.map(frame => frame.input))).toEqual(["first full input", "second full input"]);
+  expect(Socket.all.every(socket => socket.readyState === 3 && socket.frames.every(frame => !Object.hasOwn(frame, "previous_response_id")))).toBe(true);
+  expect(codexWsPool.snapshot()).toEqual({ size: 0, active: 0, timer: false });
 });
 
 test.each(["authorization", "chatgpt-account-id", "originator", "x-client-request-id", "x-custom-policy"])(
@@ -146,10 +146,10 @@ test("mutable turn headers are projected per frame; explicit body values win", a
     headers.set("x-codex-turn-metadata", JSON.stringify({ turn: state }));
     await drain({ ...options, headers });
   }
-  expect(Socket.all).toHaveLength(1);
-  expect(Socket.all[0]!.frames.map(frame => (frame.client_metadata as Record<string, string>)["x-codex-turn-state"]))
+  expect(Socket.all).toHaveLength(2);
+  expect(Socket.all.flatMap(socket => socket.frames.map(frame => (frame.client_metadata as Record<string, string>)["x-codex-turn-state"])))
     .toEqual(["state-a", "state-b"]);
-  expect((Socket.all[0]!.frames[1]!.client_metadata as Record<string, string>)["x-codex-turn-metadata"])
+  expect((Socket.all[1]!.frames[0]!.client_metadata as Record<string, string>)["x-codex-turn-metadata"])
     .toBe('{"turn":"state-b"}');
   const options = bodyWith({ client_metadata: { "x-codex-turn-state": "body-state" } });
   const headers = new Headers(options.headers); headers.set("x-codex-turn-state", "header-state");
@@ -157,30 +157,31 @@ test("mutable turn headers are projected per frame; explicit body values win", a
   expect(JSON.parse(prepared.frameText).client_metadata["x-codex-turn-state"]).toBe("body-state");
 });
 
-test("fresh warm dispatch guard refusal never sends or falls back", async () => {
+test("fresh dispatch guard refusal never sends or falls back", async () => {
   await drain();
   let checks = 0;
   await expect(request(init(), () => { if (++checks === 2) throw new Error("revoked"); })).rejects.toThrow("revoked");
   expect(checks).toBe(2);
-  expect(Socket.all).toHaveLength(1);
+  expect(Socket.all).toHaveLength(2);
   expect(Socket.all[0]!.frames).toHaveLength(1);
+  expect(Socket.all[1]!.frames).toHaveLength(0);
+  expect(Socket.all.every(socket => socket.readyState === 3)).toBe(true);
   expect(codexWsPool.snapshot().size).toBe(0);
 });
 
-test("busy identity gets an independent one-shot; old abort cannot kill successor", async () => {
+test("concurrent requests have separate sockets; old abort cannot kill successors", async () => {
   const old = new AbortController();
   await drain(init("A", old.signal));
   Socket.onSend = socket => queueMicrotask(() => socket.emit({ type: "response.created", response: { id: `active-${Socket.all.indexOf(socket)}` } }));
   const b = await request(init("B"));
   const c = await request(init("C"));
-  expect(Socket.all).toHaveLength(2);
-  expect(Socket.all[0]!.frames.map(frame => frame.input)).toEqual(["A", "B"]);
+  expect(Socket.all).toHaveLength(3);
+  expect(Socket.all.map(socket => socket.frames.map(frame => frame.input))).toEqual([["A"], ["B"], ["C"]]);
   old.abort();
-  expect(Socket.all[0]!.readyState).toBe(1);
-  for (const [index, socket] of Socket.all.entries()) socket.emit({ type: "response.completed", response: { id: `active-${index}`, status: "completed" } });
+  expect(Socket.all.map(socket => socket.readyState)).toEqual([3, 1, 1]);
+  for (const [index, socket] of Socket.all.entries()) if (index > 0) socket.emit({ type: "response.completed", response: { id: `active-${index}`, status: "completed" } });
   await b.text(); await c.text();
-  expect(Socket.all[0]!.readyState).toBe(1);
-  expect(Socket.all[1]!.readyState).toBe(3);
+  expect(Socket.all.every(socket => socket.readyState === 3)).toBe(true);
 });
 
 test("overlapping A to changed-header B to A keeps retired busy sockets tracked until release", async () => {
@@ -204,23 +205,20 @@ test("overlapping A to changed-header B to A keeps retired busy sockets tracked 
   expect(codexWsPool.snapshot()).toEqual({ size: 0, active: 0, timer: false });
 });
 
-test.each(["abort", "error", "close", "shutdown", "stale-item", "stale-response", "named-lane"])(
-  "warm %s fails its body without a resend", async reason => {
+test.each(["abort", "error", "close", "shutdown"])(
+  "subsequent %s fails its body without a resend", async reason => {
     await drain();
     Socket.onSend = socket => queueMicrotask(() => socket.emit({ type: "response.created", response: { id: "new-response" } }));
     const abort = new AbortController();
     const response = await request(init("B", abort.signal));
-    const socket = Socket.all[0]!;
+    const socket = Socket.all[1]!;
     if (reason === "abort") abort.abort();
     if (reason === "error") socket.dispatchEvent(new Event("error"));
     if (reason === "close") socket.close();
     if (reason === "shutdown") runOptionalShutdownHooks();
-    if (reason === "stale-item") socket.emit({ type: "response.output_text.delta", item_id: "old-item", delta: "MUST NOT RELAY" });
-    if (reason === "stale-response") socket.emit({ type: "response.completed", response: { id: "response-1", status: "completed" } });
-    if (reason === "named-lane") socket.emit({ type: "response.output_text.delta", stream_id: "other", delta: "MUST NOT RELAY" });
     await expect(response.text()).rejects.toThrow();
-    expect(Socket.all).toHaveLength(1);
-    expect(socket.frames).toHaveLength(2);
+    expect(Socket.all).toHaveLength(2);
+    expect(socket.frames).toHaveLength(1);
     expect(codexWsPool.snapshot()).toEqual({ size: 0, active: 0, timer: false });
   });
 
@@ -239,18 +237,20 @@ test("uncorrelatable legacy response remains usable but never retained", async (
   expect(codexWsPool.snapshot().timer).toBe(false);
 });
 
-test("bounded pool expires idle state, preserves active work, and drains on shutdown", async () => {
+test("bounded pool preserves active work, closes on completion, and drains on shutdown", async () => {
   let now = 0;
   const pool = new CodexWsPool({ now: () => now, idleMs: 30_000, maxAgeMs: 300_000, maxSessions: 2 });
   try {
     expect(pool.snapshot()).toEqual({ size: 0, active: 0, timer: false });
     const a = pool.acquire({ key: "a", scope: "a" }, "wss://fixture", {})!;
-    await Promise.resolve(); a.release("a-response");
-    now = 29_999; pool.sweep(); expect(a.closed).toBe(false);
-    now = 30_000; pool.sweep(); expect(a.closed).toBe(true);
+    await Promise.resolve();
+    expect(pool.snapshot()).toEqual({ size: 1, active: 1, timer: false });
+    now = 330_000; pool.sweep(); expect(a.closed).toBe(false);
+    a.release("a-response"); expect(a.closed).toBe(true);
+    expect(pool.snapshot()).toEqual({ size: 0, active: 0, timer: false });
     const b = pool.acquire({ key: "b", scope: "b" }, "wss://fixture", {})!;
     await Promise.resolve();
-    now = 330_000; pool.sweep(); expect(b.closed).toBe(false);
+    now = 660_000; pool.sweep(); expect(b.closed).toBe(false);
     b.release("b-response"); expect(b.closed).toBe(true);
     const c = pool.acquire({ key: "c", scope: "c" }, "wss://fixture", {})!;
     const d = pool.acquire({ key: "d", scope: "d" }, "wss://fixture", {})!;
@@ -270,7 +270,7 @@ test("shutdown before open rejects as cancellation, not fallback", async () => {
   expect(Socket.all[0]!.frames).toHaveLength(0);
 });
 
-test("quota prelude and callbacks belong to each warm exchange, not its predecessor", async () => {
+test("quota prelude and callbacks belong to each exchange, not its predecessor", async () => {
   let turn = 0;
   Socket.onSend = socket => queueMicrotask(() => {
     const id = `quota-${++turn}`;
@@ -286,16 +286,16 @@ test("quota prelude and callbacks belong to each warm exchange, not its predeces
     expect(response.headers.get("x-codex-primary-used-percent")).toBe(String(index + 1));
     await response.text();
   }
-  expect(Socket.all).toHaveLength(1);
+  expect(Socket.all).toHaveLength(2);
   expect(observed).toEqual([["1"], ["2"]]);
 });
 
-test("retirement bounds remembered response IDs and keeps all full requests intact", async () => {
+test("successive requests keep full inputs and leave no sockets or timers retained", async () => {
   for (let index = 0; index < 33; index++) await drain(init(`full-${index}`));
-  expect(Socket.all).toHaveLength(2);
-  expect(Socket.all[0]!.frames).toHaveLength(32);
-  expect(Socket.all[0]!.readyState).toBe(3);
-  expect(Socket.all[1]!.frames[0]!.input).toBe("full-32");
+  expect(Socket.all).toHaveLength(33);
+  expect(Socket.all.every(socket => socket.frames.length === 1 && socket.readyState === 3)).toBe(true);
+  expect(Socket.all.map(socket => socket.frames[0]!.input)).toEqual(Array.from({ length: 33 }, (_, index) => `full-${index}`));
+  expect(codexWsPool.snapshot()).toEqual({ size: 0, active: 0, timer: false });
 });
 
 test("a Lite mode change retires the old handshake", async () => {

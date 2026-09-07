@@ -870,7 +870,7 @@ describe("codexWsUpstreamFetch", () => {
         } finally { jest.useRealTimers(); }
       });
 
-    test.each([false, true])("disposes a retained socket; correlation precedes conversion (foreign stream: %s)", async foreign => {
+    test("disposes a completed socket and refuses another exchange on it", async () => {
       installFake(ws => {
         ws.emit("open", {});
         emit(ws, { type: "response.created", response: { id: "completed-first" } });
@@ -882,33 +882,16 @@ describe("codexWsUpstreamFetch", () => {
       let fallbacks = 0;
       const options = { session, url: CODEX_URL, init, prepared, sseFallback: (async () => {
         fallbacks++;
-        throw new Error("retained create must not fall back");
+        throw new Error("completed create must not fall back");
       }) as typeof fetch };
       try {
         expect(session.reserve()).toBe(true);
         await (await codexWsExchange(options)).text();
-        expect(session.reused).toBe(true);
-        expect(session.closed).toBe(false);
         const ws = FakeWebSocket.instances.at(-1)!;
-        let terminations = 0;
-        Object.assign(ws, { terminate: () => { terminations++; } });
-        ws.send = data => { ws.sent.push(data); emit(ws, { ...refusal, ...(foreign ? { stream_id: "foreign" } : {}) }); };
-        expect(session.reserve()).toBe(true);
-        const response = await codexWsExchange(options);
-        if (foreign) {
-          expect(response.status).toBe(200);
-          await expect(response.text()).rejects.toThrow("identity mismatch");
-        } else {
-          expect(response.status).toBe(429);
-          expect(isCodexWsUpstreamResponse(response)).toBe(false);
-          expect(await response.json()).toEqual({ error: refusal.error });
-        }
-        expect(ws.sent).toHaveLength(2);
+        expect(ws.sent).toHaveLength(1);
         expect(ws.closed).toBe(true);
-        expect(terminations).toBe(1);
         expect(session.closed).toBe(true);
         expect(session.busy).toBe(false);
-        expect(session.hasCompleted("completed-first")).toBe(false);
         expect(session.reserve()).toBe(false);
         expect(fallbacks).toBe(0);
         expect([...ws.listeners.values()].every(listeners => listeners.length === 0)).toBe(true);

@@ -58,7 +58,7 @@ export function codexWsReuseIdentity(url: string, headers: Record<string, string
 interface Entry { identity: CodexWsReuseIdentity; session: CodexWsSession; createdAt: number; idleAt: number; retired: boolean }
 interface PoolOptions { now?: () => number; maxSessions?: number; idleMs?: number; maxAgeMs?: number }
 
-/** Bounded retained sockets only. Busy/capacity misses keep the existing one-shot path. */
+/** Bounded active sockets. Busy/capacity misses keep the existing one-shot path. */
 export class CodexWsPool {
   private readonly entries = new Map<string, Entry>();
   private timer?: ReturnType<typeof setTimeout>;

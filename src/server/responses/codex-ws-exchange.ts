@@ -97,7 +97,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
     let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
     const encoder = new TextEncoder();
     const metadata = url === CODEX_RESPONSES_HTTP_URL ? new CodexWsMetadata(onQuota) : null;
-    const correlation = session.retainable ? new CodexWsCorrelation(session.reused, id => session.hasCompleted(id)) : null;
+    const correlation = session.retainable ? new CodexWsCorrelation(false, () => false) : null;
     let detachOwner = () => {};
     let preludeTimer: ReturnType<typeof setTimeout> | undefined;
     const stream = new ReadableStream<Uint8Array>({

@@ -1,5 +1,3 @@
-export const MAX_CODEX_WS_SESSION_EXCHANGES = 32;
-
 /** Owns one physical socket; request listeners belong to the exchange, not this object. */
 export class CodexWsSession {
   readonly socket: WebSocket;
@@ -7,7 +5,6 @@ export class CodexWsSession {
   closed = false;
   busy = false;
   private owner?: (reason: Error) => void;
-  private readonly completedIds = new Set<string>();
 
   constructor(url: string, headers: Record<string, string>, readonly retainable = false,
     private readonly changed: () => void = () => {}, proxy?: string) {
@@ -17,9 +14,6 @@ export class CodexWsSession {
     this.socket.addEventListener("close", this.onClose);
     this.socket.addEventListener("error", this.onIdleError);
   }
-
-  get reused(): boolean { return this.completedIds.size > 0; }
-  hasCompleted(id: string): boolean { return this.completedIds.has(id); }
 
   reserve(): boolean {
     if (this.closed || this.busy || (this.opened && this.socket.readyState !== undefined && this.socket.readyState !== 1)) return false;
@@ -35,23 +29,9 @@ export class CodexWsSession {
     return () => { if (this.owner === owner) this.owner = undefined; };
   }
 
-  release(completedId: string | null): void {
+  release(_completedId: string | null): void {
     this.owner = undefined;
-    if (this.closed) return;
-    if (!this.retainable || !completedId || !this.opened
-      || (this.socket.readyState !== undefined && this.socket.readyState !== 1)) {
-      this.dispose();
-      return;
-    }
-    this.completedIds.add(completedId);
-    if (this.completedIds.size >= MAX_CODEX_WS_SESSION_EXCHANGES) {
-      this.dispose();
-      return;
-    }
-    this.busy = false;
-    const socket = this.socket as WebSocket & { unref?: () => void };
-    try { socket.unref?.(); } catch { /* optional hint; shutdown/expiry still owns cleanup */ }
-    this.changed();
+    this.dispose();
   }
 
   dispose(reason = new Error("codex websocket session disposed")): void {
@@ -62,7 +42,6 @@ export class CodexWsSession {
     this.detach();
     try { owner?.(reason); } finally {
       this.busy = false;
-      this.completedIds.clear();
       try { this.socket.close(); } catch { /* already closing */ }
       if (this.retainable) {
         try { (this.socket as WebSocket & { terminate?: () => void }).terminate?.(); } catch { /* already closed */ }
@@ -79,7 +58,6 @@ export class CodexWsSession {
   private onClose = (): void => {
     this.closed = true;
     this.busy = false;
-    this.completedIds.clear();
     this.detach();
     this.changed();
     // The active exchange's close listener retains pre-send fallback semantics.

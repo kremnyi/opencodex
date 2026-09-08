@@ -436,9 +436,10 @@ Pre-open HTTP fallback remains unmarked and follows the ordinary configured
 stream path.
 
 At the canonical ChatGPT destination, HTTP Responses Lite intent is copied into
-the native per-frame WS metadata key, and the routing hint is derived from the
-final outgoing model/tier. No caller identity is synthesized. Noncanonical
-opt-in gateways keep their own metadata policy. Oversized/unsupported-runtime
+the native per-frame WS metadata key. Optional routing hints are omitted from
+HTTP and WS headers; the outgoing body retains the model and service tier. No
+caller identity is synthesized. Noncanonical opt-in gateways keep their own
+metadata policy. Oversized/unsupported-runtime
 HTTP fallback preserves the original HTTP body and Lite header.
 
 Canonical WS quota and response metadata preceding the first Responses event

@@ -489,7 +489,7 @@ describe("isWin32EagerRewrite", () => {
 });
 
 describe("codexWsUpstreamFetch", () => {
-  test("the complete HTTP adapter dispatch maps Lite and final routing intent onto the actual WS", async () => {
+  test("the complete HTTP adapter dispatch preserves Lite and body routing without a WS routing hint", async () => {
     const frames: Record<string, unknown>[] = [];
     const seenHeaders: Record<string, string>[] = [];
     class CapturingSocket extends FakeWebSocket {
@@ -514,7 +514,9 @@ describe("codexWsUpstreamFetch", () => {
     await response.text();
     expect(frames).toHaveLength(1);
     expect(frames[0].client_metadata).toEqual({ ws_request_header_x_openai_internal_codex_responses_lite: "true" });
-    expect(seenHeaders[0]["x-codex-routing-hint"]).toBe("model=gpt-5.5;tier=priority");
+    expect(frames[0].model).toBe("gpt-5.5");
+    expect(frames[0].service_tier).toBe("priority");
+    expect(seenHeaders[0]["x-codex-routing-hint"]).toBeUndefined();
   });
 
   test("projects canonical WS prelude into the HTTP response before committing headers", async () => {
@@ -1242,7 +1244,7 @@ describe("codexWsUpstreamFetch", () => {
     }
   });
 
-  test("malformed native WS metadata still normalizes the real HTTP fallback routing hint", async () => {
+  test("malformed native WS metadata still removes routing hints from the real HTTP fallback", async () => {
     let fallbackInit: RequestInit | undefined;
     const body = JSON.stringify({ model: "gpt-6-astra", service_tier: "priority", stream: true, client_metadata: [] });
     const response = await codexWsUpstreamFetch(CODEX_URL, {
@@ -1252,7 +1254,7 @@ describe("codexWsUpstreamFetch", () => {
       return new Response("http-fallback");
     }) as typeof fetch);
     expect(await response.text()).toBe("http-fallback");
-    expect(new Headers(fallbackInit?.headers).get("x-codex-routing-hint")).toBe("model=gpt-6-astra;tier=priority");
+    expect(new Headers(fallbackInit?.headers).has("x-codex-routing-hint")).toBe(false);
     expect(fallbackInit?.body).toBe(body);
     expect(FakeWebSocket.instances).toHaveLength(0);
   });

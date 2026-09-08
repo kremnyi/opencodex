@@ -182,7 +182,7 @@ describe("Codex request transport metadata", () => {
     expect(JSON.parse(prepared.frameText).client_metadata[liteKey]).toBe("false");
   });
 
-  test("canonical adapter forwards Lite through selected auth and derives the final wire tier/model", async () => {
+  test("canonical adapter forwards Lite through selected auth and omits routing hints", async () => {
     const parsed = minimalParsed();
     parsed.modelId = "gpt-5.4";
     parsed._rawBody = { model: "gpt-5.6-sol", input: [], service_tier: "flex" };
@@ -198,14 +198,14 @@ describe("Codex request transport metadata", () => {
     const request = await adapter.buildRequest(parsed, { headers: incoming });
     const headers = new Headers(request.headers);
     expect(headers.get(liteHeader)).toBe("false");
-    expect(headers.get(hintHeader)).toBe("model=gpt-5.6-sol;tier=priority");
+    expect(headers.has(hintHeader)).toBe(false);
     expect(headers.get("authorization")).toBe("Bearer pool_a_token");
     expect(headers.get("originator")).toBe("codex_desktop");
     expect(JSON.parse(request.body).service_tier).toBe("priority");
     expect(JSON.stringify(parsed._rawBody)).toBe(before);
     parsed.options.tierDecision = { kind: "drop" };
     const dropped = await adapter.buildRequest(parsed, { headers: incoming });
-    expect(new Headers(dropped.headers).get(hintHeader)).toBe("model=gpt-5.6-sol");
+    expect(new Headers(dropped.headers).has(hintHeader)).toBe(false);
   });
 
   test("noncanonical adapters neither forward caller Lite nor synthesize a routing hint", async () => {
@@ -245,7 +245,7 @@ describe("Codex request transport metadata", () => {
         client_metadata: { [liteKey]: lite, other: "한글; untouched" },
       });
       const wsHeaders = new Headers(prepared.headers);
-      expect(wsHeaders.get(hintHeader)).toBe("model=gpt-5.6-sol;tier=priority");
+      expect(wsHeaders.has(hintHeader)).toBe(false);
       expect(wsHeaders.get("openai-beta")).toBe("other=fixture, responses_websockets=2026-02-06");
       for (const name of ["content-type", "content-length", "accept", "accept-encoding"]) {
         expect(wsHeaders.has(name)).toBe(false);
@@ -254,9 +254,9 @@ describe("Codex request transport metadata", () => {
         expect(wsHeaders.get(name)).toBe(headers.get(name));
       }
       expect(prepared.httpInit).not.toBe(init);
-      expect(prepared.httpInit).toEqual({ ...init, headers: new Headers({
-        ...Object.fromEntries(headers), [hintHeader]: "model=gpt-5.6-sol;tier=priority",
-      }) });
+      const expectedHeaders = new Headers(headers);
+      expectedHeaders.delete(hintHeader);
+      expect(prepared.httpInit).toEqual({ ...init, headers: expectedHeaders });
       expect(prepared.httpInit.body).toBe(body);
       expect(prepared.httpInit.signal).toBe(init.signal);
       expect([...headers]).toEqual(beforeHeaders);
@@ -314,12 +314,10 @@ describe("Codex request transport metadata", () => {
     }
   });
 
-  test("routing hint removes stale values and rejects invalid model or tier components without changing the body", async () => {
+  test("routing hint removal preserves unrelated headers and the request body", async () => {
     const { applyCodexRoutingHint } = await import("../../src/codex/forward-transport-headers");
-    const invalid = ["", " ", "model;service_tier=priority", "model=tier", "a b", "a\t", "a\n", "a\r", "a\0", "a\x7f", "é", null, 42];
-    for (const body of [null, [], "text", {}, ...invalid.map(model => ({ model })),
-      ...invalid.map(service_tier => ({ model: "gpt-5.4", service_tier })),
-      { model: "m".repeat(257) }, { model: "gpt-5.4", service_tier: "t".repeat(65) }]) {
+    for (const body of [null, [], "text", {}, { model: "gpt-5.4" },
+      { model: "gpt-6-astra", service_tier: "priority", input: [{ role: "user", content: "hello" }] }]) {
       const headers = new Headers({ [hintHeader]: "model=stale;service_tier=priority", originator: "unchanged" });
       const before = JSON.stringify(body);
       applyCodexRoutingHint(headers, body);
@@ -329,8 +327,8 @@ describe("Codex request transport metadata", () => {
     }
     const headers = new Headers();
     applyCodexRoutingHint(headers, { model: "m".repeat(256), service_tier: "t".repeat(64) });
-    expect(headers.get(hintHeader)).toBe(`model=${"m".repeat(256)};tier=${"t".repeat(64)}`);
+    expect(headers.has(hintHeader)).toBe(false);
     applyCodexRoutingHint(headers, { model: "gpt-5.4" });
-    expect(headers.get(hintHeader)).toBe("model=gpt-5.4");
+    expect(headers.has(hintHeader)).toBe(false);
   });
 });
